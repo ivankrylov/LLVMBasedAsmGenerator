@@ -41,6 +41,7 @@ enum ActionType {
   PrintEnums,
   PrintSets,
   GenOptParserDefs,
+  GetHotspotInstrInfo,
   GenCTags
 };
 
@@ -85,6 +86,8 @@ namespace {
                                "Generate option definitions"),
                     clEnumValN(GenCTags, "gen-ctags",
                                "Generate ctags-compatible index"),
+                    clEnumValN(GetHotspotInstrInfo, "gen-hotspot-instr-defs",
+                               "Generate instruction info for HotSpot"),
                     clEnumValEnd));
 
   cl::opt<std::string>
@@ -165,8 +168,15 @@ bool LLVMTableGenMain(raw_ostream &OS, RecordKeeper &Records) {
   case GenCTags:
     EmitCTags(Records, OS);
     break;
+    
+  case GetHotspotInstrInfo:
+  {
+    EmitHotspotInstrInfo(Records, OS);
+    break;
   }
 
+  }
+  
   return false;
 }
 }

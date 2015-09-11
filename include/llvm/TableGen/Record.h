@@ -877,7 +877,6 @@ public:
 /// VarBitInit - Opcode{0} - Represent access to one bit of a variable or field.
 ///
 class VarBitInit : public Init {
-  TypedInit *TI;
   unsigned Bit;
 
   VarBitInit(TypedInit *T, unsigned B) : Init(IK_VarBitInit), TI(T), Bit(B) {
@@ -892,6 +891,7 @@ class VarBitInit : public Init {
   VarBitInit &operator=(const VarBitInit &Other) = delete;
 
 public:
+  TypedInit *TI;
   static bool classof(const Init *I) {
     return I->getKind() == IK_VarBitInit;
   }

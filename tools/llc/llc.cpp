@@ -45,6 +45,7 @@
 #include "llvm/Support/ToolOutputFile.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Target/TargetSubtargetInfo.h"
+#include "llvm/MC/MCInstrInfo.h"
 #include <memory>
 using namespace llvm;
 
@@ -96,13 +97,21 @@ static cl::opt<bool> AsmVerbose("asm-verbose",
                                 cl::desc("Add comments to directives."),
                                 cl::init(true));
 
+static cl::opt<bool> PrintInstructions("print-instructions",
+                                cl::desc("Prints Instruction info needed for Hotspot"),
+                                cl::init(false));
+
 static int compileModule(char **, LLVMContext &);
 
 static std::unique_ptr<tool_output_file>
 GetOutputStream(const char *TargetName, Triple::OSType OS,
                 const char *ProgName) {
   // If we don't yet have an output filename, make one.
-  if (OutputFilename.empty()) {
+  if (PrintInstructions.getValue()) {
+    if (OutputFilename.empty()) {
+        OutputFilename = "hotspot.out";
+    } 
+  } else {  if (OutputFilename.empty()) {
     if (InputFilename == "-")
       OutputFilename = "-";
     else {
@@ -138,6 +147,7 @@ GetOutputStream(const char *TargetName, Triple::OSType OS,
         break;
       }
     }
+  }
   }
 
   // Decide if we need "binary" output.
@@ -206,6 +216,30 @@ int main(int argc, char **argv) {
   return 0;
 }
 
+
+void printInstructions(const Target *TheTarget,raw_pwrite_stream *OS) {
+    MCInstrInfo* mcii=TheTarget->createMCInstrInfo();
+    
+   
+
+    errs() <<  "Printing " << mcii->getNumOpcodes() 
+            << " opcodes data  for " 
+            << TheTarget->getName()
+            << "\n";
+    for (unsigned int i=0; i< mcii->getNumOpcodes(); i++) {
+    *OS << "("<<i<<"). Opcode: "<< mcii->getName(i)
+              <<" operands:" << mcii->get(i).getNumOperands() 
+              <<"\n";
+    }
+    
+    
+}
+
+void prepare_output_stream() {
+    
+}
+
+
 static int compileModule(char **argv, LLVMContext &Context) {
   // Load the module to be compiled...
   SMDiagnostic Err;
@@ -217,7 +251,7 @@ static int compileModule(char **argv, LLVMContext &Context) {
                     (!MAttrs.empty() && MAttrs.front() == "help");
 
   // If user just wants to list available options, skip module loading
-  if (!SkipModule) {
+  if ((!SkipModule) && (!PrintInstructions.getValue())) {
     if (StringRef(InputFilename).endswith_lower(".mir")) {
       MIR = createMIRParserFromFile(InputFilename, Err, Context);
       if (MIR) {
@@ -290,15 +324,32 @@ static int compileModule(char **argv, LLVMContext &Context) {
   // creation.
   if (SkipModule)
     return 0;
-
-  assert(M && "Should have exited if we didn't have a module!");
-  if (FloatABIForCalls != FloatABI::Default)
-    Options.FloatABIType = FloatABIForCalls;
-
+  
   // Figure out where we are going to send the output.
   std::unique_ptr<tool_output_file> Out =
       GetOutputStream(TheTarget->getName(), TheTriple.getOS(), argv[0]);
   if (!Out) return 1;
+
+  {
+    raw_pwrite_stream *OS = &Out->os();
+    std::unique_ptr<buffer_ostream> BOS;
+    if (FileType != TargetMachine::CGFT_AssemblyFile &&
+        !Out->os().supportsSeeking()) {
+      BOS = make_unique<buffer_ostream>(*OS);
+      OS = BOS.get();
+    }
+    
+
+  if (PrintInstructions.getValue()) {
+    printInstructions(TheTarget, OS);
+    Out->keep();
+    return 0;
+  }
+
+
+  assert(M && "Should have exited if we didn't have a module!");
+  if (FloatABIForCalls != FloatABI::Default)
+    Options.FloatABIType = FloatABIForCalls;
 
   // Build up all of the passes that we want to do to the module.
   legacy::PassManager PM;
@@ -323,14 +374,6 @@ static int compileModule(char **argv, LLVMContext &Context) {
     errs() << argv[0]
              << ": warning: ignoring -mc-relax-all because filetype != obj";
 
-  {
-    raw_pwrite_stream *OS = &Out->os();
-    std::unique_ptr<buffer_ostream> BOS;
-    if (FileType != TargetMachine::CGFT_AssemblyFile &&
-        !Out->os().supportsSeeking()) {
-      BOS = make_unique<buffer_ostream>(*OS);
-      OS = BOS.get();
-    }
 
     AnalysisID StartBeforeID = nullptr;
     AnalysisID StartAfterID = nullptr;
