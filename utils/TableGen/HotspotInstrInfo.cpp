@@ -52,17 +52,22 @@ using namespace llvm;
 // * Need to understand and handle types like DPR, QPR
 // * process bit initializers
 // * failures methods starting with s && t
+// * arg_sizes is misleading. Need to fix bad record detection
 
 
 
 namespace {
 
   class ValueEncoding {
+    public:
+    
      std::vector<unsigned> starting_bit; 
      std::vector<unsigned> ending_bit;
-     unsigned total_encoding_bits;
-     
-    
+     ValueEncoding(
+       std::vector<unsigned>& _starting_bit,
+       std::vector<unsigned>& _ending_bit);
+     int encode_value(std::string param, raw_ostream &OS);
+     ValueEncoding();
   };
   
   class HotspotInstrInfoEmitter {
@@ -82,6 +87,61 @@ namespace {
   private:
   };
 } // End anonymous namespace
+
+int ValueEncoding::encode_value(std::string param, raw_ostream &OS) {
+  
+    int segments=starting_bit.size();
+    unsigned result=0;
+    unsigned progress=0;
+    
+    
+    int param_start_pos=0;
+
+    for (int i=0; i < segments; i++) {
+      OS << "  instr_enc |= (";
+      if (!param_start_pos)        
+        OS << param;
+      else
+        OS << "(" << param << ">>" << param_start_pos << ")";
+      OS    << ".value()"
+              << " & 0x";
+      OS.write_hex( (1<<(1+ending_bit[i]-starting_bit[i]))-1 );
+      OS << ")";
+      if (starting_bit[i])
+        OS << " << "
+              << starting_bit[i];
+      OS << ";\n";
+      param_start_pos+=1+ending_bit[i]-starting_bit[i];
+      
+    }
+    
+    return 0;
+
+/*
+ *     for (int i= 0; i < segments; i++ ) {
+      int bits_in_this_seg = 1 + ending_bit[i]-starting_bit[i];   
+      unsigned mask = (1 << bits_in_this_seg) - 1 ;
+      result += ( (param>>progress) & mask ) << starting_bit[i];
+      progress+=bits_in_this_seg;
+      
+      
+      
+    }
+    return result;
+  */  
+    
+    
+  
+  }
+
+ValueEncoding::ValueEncoding() {};
+
+ValueEncoding::ValueEncoding(
+          std::vector<unsigned>& _starting_bit,
+          std::vector<unsigned>& _ending_bit) {
+  starting_bit=_starting_bit;
+  ending_bit=_ending_bit;
+}
 
 static void PrintDefList(const std::vector<Record*> &Uses,
         unsigned Num, raw_ostream &OS) {
@@ -164,10 +224,6 @@ void HotspotInstrInfoEmitter::run(raw_ostream &OS) {
       continue;
     }
 
-
-
-
-
     BitsInit* bi = Inst->getValueAsBitsInit("Inst");
 
     // Not found or incomplete
@@ -194,11 +250,11 @@ void HotspotInstrInfoEmitter::run(raw_ostream &OS) {
     // This should really be a 3-element std::tuple
     std::vector<std::string> arg_names;
     std::vector<unsigned> arg_sizes;
-    std::vector<unsigned> start_positions;
     std::vector<std::string> type_names;
     bool error_while_parsing=false;
     std::string error_msg;
     int start_of_in_args=0;
+    std::vector<ValueEncoding> encodings;
 
       // OK, now we process DAG of output arguments. 
       // Should be 0 or 1 but who knows..
@@ -225,7 +281,7 @@ void HotspotInstrInfoEmitter::run(raw_ostream &OS) {
         arg_sizes.push_back(-1);
       }
       arg_names.push_back(aname);
-      start_positions.push_back(-1); //uninitialized
+      encodings.push_back(ValueEncoding());
 
       // Stupid assumption that if there is a destination element - it is a reg
       type_names.push_back("Register");
@@ -251,7 +307,7 @@ void HotspotInstrInfoEmitter::run(raw_ostream &OS) {
         
         continue;
       }
-      if StrEq(aname,"s")  { 
+      if (0) {//StrEq(aname,"s")  { 
         // we deliberately omit the cc_out argument
         // see comments in ARMAsmParser::shouldOmitCCOutOperand
         // This is not needed for the current prototype
@@ -342,7 +398,7 @@ void HotspotInstrInfoEmitter::run(raw_ostream &OS) {
         }
       }
       arg_names.push_back(aname);
-      start_positions.push_back(-1); //uninitialized
+      encodings.push_back(ValueEncoding());
     }
     
     if (error_while_parsing) {
@@ -383,7 +439,6 @@ void HotspotInstrInfoEmitter::run(raw_ostream &OS) {
         for (j=0;j<arg_names.size();j++) {
           if StrEq(arg_names[j],n) {
             // Found a matching name, let's record from what byte encoding starts
-            start_positions[j] = i;
                         
             // Let's find how many consecutive bits denoted with string n 
             int z=i-1;
@@ -407,6 +462,8 @@ void HotspotInstrInfoEmitter::run(raw_ostream &OS) {
               // Still OK, the length was not known
               arg_sizes[j] = (z-i+1);
             }
+            
+            /*
            
             if (arg_sizes[j] != (z-i)) {
               // something is wrong with instruction encoding
@@ -450,7 +507,12 @@ void HotspotInstrInfoEmitter::run(raw_ostream &OS) {
                       << "\n\n";
               error_while_parsing=true;
             }
-            i+=arg_sizes[j]-1;
+             */
+            
+            encodings[j].starting_bit.push_back(i);
+            encodings[j].ending_bit.push_back(z-1);
+            i=z-1;  // jump ahead to the next bit that is different
+            
           }
           if (error_while_parsing) break;
           
@@ -511,30 +573,18 @@ void HotspotInstrInfoEmitter::run(raw_ostream &OS) {
     // Encode parameters
     for (int j = 0; j < arg_names.size(); j++) {
 
-      if (arg_sizes[j] == -1) {
-        OS << "  // Error while parsing record " << name << "\n";
-        // Save the "bad record"
-        troubled_records.push_back(name);
-        // No reason to encode instruction further
-        break;
-      }
-      
-      if (start_positions[j] == -1) {
-
-        // Skip parameter j in emition since it was not found in the encoding
+      if ((arg_sizes[j] == -1) 
+        || (encodings[j].starting_bit.size() == 0)) {
+        
+        // Not a fatal error
+        // Apparently there was an argument that is not mentioned
+        // in encoding
+        
         continue;
       }
+      
 
-      OS << "  instr_enc |= ("
-              << arg_names[j]
-              << ".value()"
-              << " & ((1 << "
-              << arg_sizes[j]
-              << ") - 1 ))";
-      if (start_positions[j])
-        OS << " << "
-              << start_positions[j];
-      OS << ";\n";
+      encodings[j].encode_value(arg_names[j], OS);
     }
     // ==================================
     // Emit intruction and exit
