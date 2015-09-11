@@ -125,8 +125,18 @@ void HotspotInstrInfoEmitter::run(raw_ostream &OS) {
     auto name = Inst->getValueAsString("NAME");
 
     // TODO: troubles with instructions starting with t
-    if (name[0]=='t') continue;
-    if (name[0]=='s') continue;
+    if (name[0]=='t') {
+      OS << "//Exclusion of instruction record "
+              << name 
+              << ". \n//due to knon issues with instructions that start with 't'\n\n";
+      continue;
+    }
+    if (name[0]=='s') {
+      OS << "//Exclusion of instruction record "
+              << name 
+              << ". \n//due to knon issues with instructions that start with 's'\n\n";
+      continue;
+    }
     
     //#ifdef DEBUG_PRINTS_HOTSPOT_INST_GENERATOR
     //OS << "Record: " << *Inst << "\n\n\n";
@@ -140,8 +150,13 @@ void HotspotInstrInfoEmitter::run(raw_ostream &OS) {
     if (Inst->getValueAsString("Namespace") == "TargetOpcode" ||
         Inst->getValueAsBit("isPseudo") ||
         Inst->getValueAsBit("isAsmParserOnly") ||
-        Inst->getValueAsBit("isCodeGenOnly"))
+        Inst->getValueAsBit("isCodeGenOnly")) {
+      
+      OS << "//Proper exclusion of instruction record "
+              << name 
+              << ". \n//Not part of the actual instruction set\n\n";
       continue;
+    }
 
 
 
@@ -150,7 +165,20 @@ void HotspotInstrInfoEmitter::run(raw_ostream &OS) {
     BitsInit* bi = Inst->getValueAsBitsInit("Inst");
 
     // Not found or incomplete
-    if ((!bi) || (bi->allInComplete())) continue;
+    if ((!bi) || (bi->allInComplete())) {
+      OS << "//Proper exclusion of instruction record "
+              << name 
+              << ". \n//The Inst Record is not found or incomplete\n\n";
+      continue;
+    }
+
+    if (bi->getNumBits() != 32 ) {
+      OS << "//We can't handle yet instructions with encodings other that 32-bit\n"
+              << "//therefore skipping instruction record "
+              << name 
+              << "\n\n";
+      continue;
+    }
 
     std::vector<std::pair<Init*, std::string> > InOutOperands;
     DagInit *Out = Inst->getValueAsDag("OutOperandList");
@@ -403,13 +431,15 @@ void HotspotInstrInfoEmitter::run(raw_ostream &OS) {
   OS << "\n\n// Total instruction records: " << total<<"\n";  
   OS << "// Emitted methods (including faulty ones): " << good<<"\n";  
   int errors=(int)troubled_records.size();
-  if (errors) {
+  /*
+   * if (errors) {
       OS << "//These "<<errors<<" instructions gave following troubles: "
               <<"\n//  an input param is of unknown length or at unknown positions:\n";  
     for (int i=0; i< troubled_records.size(); i++) {
       OS << "  " << troubled_records[i] << "\n";  
     }
   }
+   */
   
 
 }
