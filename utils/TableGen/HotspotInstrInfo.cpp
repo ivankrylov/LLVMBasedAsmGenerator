@@ -31,6 +31,13 @@
 
 using namespace llvm;
 
+#define StrEq(a,b) ( a.compare(b)==0 )
+
+#define D OS << "At line: " << __LINE__ << "\n"; OS.flush();
+
+#define E(x) OS << "At line: " << __LINE__ <<  " " << #x << " " << x <<  "\n"; OS.flush();
+
+
 //#define DEBUG_PRINTS_HOTSPOT_INST_GENERATOR
 
 
@@ -41,12 +48,10 @@ using namespace llvm;
 
 // Known issues:
 // * Can not handle ranges. When a 12-bit immediate is encoded into instruction
-//     as bits 0..3 and 8..15. We do not even detect this situation!
+//     as bits 0..3 and 8..15. Reported as # of instructions with weared encodings
 // * Need to understand and handle types like DPR, QPR
 // * process bit initializers
 // * failures methods starting with s && t
-// * failures methods starting with s && t
-// * check that instruction is not 32-bit encoded
 
 
 
@@ -110,6 +115,7 @@ void HotspotInstrInfoEmitter::run(raw_ostream &OS) {
   std::vector<std::string> troubled_records;
   int total=0;
   int good=0;
+  int nr_inst_with_broken_encodings=0;
 
   // Emit all of the instruction's implicit uses and defs.
   for (const CodeGenInstruction *II : Target.instructions()) {
@@ -190,6 +196,9 @@ void HotspotInstrInfoEmitter::run(raw_ostream &OS) {
     std::vector<unsigned> arg_sizes;
     std::vector<unsigned> start_positions;
     std::vector<std::string> type_names;
+    bool error_while_parsing=false;
+    std::string error_msg;
+    int start_of_in_args=0;
 
       // OK, now we process DAG of output arguments. 
       // Should be 0 or 1 but who knows..
@@ -223,14 +232,27 @@ void HotspotInstrInfoEmitter::run(raw_ostream &OS) {
     }  // for all output arguments
 
 
+      // OK, now we process DAG of input arguments. 
+      // We want to know names and (if possible) sizes
+    
+    start_of_in_args= arg_names.size();
+
     for (unsigned i = 0; i < In->getNumArgs(); ++i) {
+      
+      if (error_while_parsing) break;
+      
       const std::string &aname = In->getArgName(i);
+      
       if (aname.empty()) {
         // No name for VarArg, see EORrsr for example
+
+        // We still will try to generate such instruction
+        error_while_parsing=true;
+        
         continue;
       }
-      if (aname.compare("s") == 0) {
-        // we delibertly omit the cc_out argument
+      if StrEq(aname,"s")  { 
+        // we deliberately omit the cc_out argument
         // see comments in ARMAsmParser::shouldOmitCCOutOperand
         // This is not needed for the current prototype
 
@@ -241,6 +263,11 @@ void HotspotInstrInfoEmitter::run(raw_ostream &OS) {
                 << "// may require a fixup. The cc_out bit position is "
                 << i << "\n";
 #endif // DEBUG_PRINTS_HOTSPOT_INST_GENERATOR
+        OS << "//We can't handle yet instructions with s-bit (cc_out bit)\n"
+              << "//therefore skipping instruction record "
+              << name 
+              << "\n\n";
+        error_while_parsing=true;
         continue;
       } // end of a check fro "s"
 
@@ -250,17 +277,22 @@ void HotspotInstrInfoEmitter::run(raw_ostream &OS) {
       std::string type_name = In->getArg(i)->getAsString();
 
       // Let's detect the type of a given input argument
-      if (type_name.compare("so_reg_reg") == 0) {
+      if StrEq(type_name,"so_reg_reg") {
         type_names.push_back("ShiftRegister");
       } else {
-        if (type_name.compare("so_reg_imm") == 0) {
+        if StrEq(type_name,"so_reg_imm") {
           type_names.push_back("ShiftImmediate");
         } else {
-          if (type_name.compare("mod_imm") == 0) {
+          if StrEq(type_name,"mod_imm") {
             type_names.push_back("Immediate");
           } else {
-            if (type_name.compare("QPR") == 0) {
+            if StrEq(type_name,"QPR") {
+              OS << "//We can't handle yet instructions with QPR regs as imuts\n"
+                    << "//therefore skipping instruction record "
+                    << name 
+                    << "\n\n";
               // Don't know how to handle these
+              error_while_parsing=true;
               continue;
             } else {
               // Both for register and immediates. Is it right?
@@ -289,7 +321,7 @@ void HotspotInstrInfoEmitter::run(raw_ostream &OS) {
                 
                 // Dirty hack. I just don't know what to how to check
                 // that a field is of a BitInit type
-                || (aname.compare("lane")==0))) {
+                || StrEq(aname,"lane"))) {
         //#ifdef DEBUG_PRINTS_HOTSPOT_INST_GENERATOR
         OS << "with length 1 bit\n";
         //#endif // DEBUG_PRINTS_HOTSPOT_INST_GENERATOR
@@ -312,33 +344,122 @@ void HotspotInstrInfoEmitter::run(raw_ostream &OS) {
       arg_names.push_back(aname);
       start_positions.push_back(-1); //uninitialized
     }
+    
+    if (error_while_parsing) {
+      // Some error was detected earlier
+      // We already printed diagnostics
+      // Need to go now to the next instruction record
+      continue;
+    }
 
-    // OK, now we know all in/out arguments names and sizes
+
+    // OK, now we know all in/out arguments names and sizes (perhaps))
     // Time to find out where those arguments should be encoded 
     // in an instruction.
     // This is done by walking the "Inst" list
     // Along the way we will reconstruct the opcode     
 
 
+    // accum is where we store opcode and other constant in this instruction
     unsigned int accum = 0;
+    
+    
+    // Walk the Inst list in the current record
+    
+    int number_of_bits=bi->getNumBits();
     for (int i = 0; i < bi->getNumBits(); i++) {
+
       if (VarBitInit::classof(bi->getBit(i))) {
+        
         // let's try parameters first
         VarBitInit *Bp = dyn_cast<VarBitInit>(bi->getBit(i));
+        
+        // One or several letters corresponding to the bit in Inst struct
         const std::string n = Bp->TI->getAsString();
 
         int j = 0;
-        for (std::vector<std::string>::const_iterator it = arg_names.begin();
-             it != arg_names.end();
-             j++, it++) {
-          if (it->compare(n) == 0) {
-            
+        bool record_found;
+
+        for (j=0;j<arg_names.size();j++) {
+          if StrEq(arg_names[j],n) {
             // Found a matching name, let's record from what byte encoding starts
             start_positions[j] = i;
+                        
+            // Let's find how many consecutive bits denoted with string n 
+            int z=i-1;
+            std::string m;
+            do { 
+              z++;
+              VarBitInit *Bpp = dyn_cast<VarBitInit>(bi->getBit(z));
+              if (Bpp) 
+                m = Bpp->TI->getAsString();
+              else
+                // No VarBitInit means no name 
+                //   and that means different name from 'n'
+                //     therefore so we found the end of sequence
+                m="";
+            } while ( StrEq(n,m) && ( z < (number_of_bits-1) ) );
+           
+            // z should always point to the first bit after the sequence
+            if (StrEq(n,m)) z++; 
+           
+            if ( arg_sizes[j] == -1) {
+              // Still OK, the length was not known
+              arg_sizes[j] = (z-i+1);
+            }
+           
+            if (arg_sizes[j] != (z-i)) {
+              // something is wrong with instruction encoding
+              // We don't know to parse such ones
+              
+              OS << "// Instruction "
+                      << name
+                      << " has parameter "
+                      << n
+                      <<" encoding that we can not handle\n"
+                      "// namely this: "
+                      << *bi
+                      << "\n"
+                      << "// (start position "
+                      << start_positions[j]
+                      << ". detected size:"
+                      << (z-i)
+                      << " versus expected "
+                      << arg_sizes[j]
+                      << ")\n\n";
+              nr_inst_with_broken_encodings++;
+              error_while_parsing=true;
+            }           
+            
+            if ( (arg_sizes[j] + start_positions[j]) > 32) {
+              
+              // This is actually a programmatic error 
+              
+              OS << "// Instruction has parameter "
+                      << n
+                      <<" encoding that we can not handle. Exceeding inst size\n"
+                      "// namely this: "
+                      << *bi
+                      << "\n"
+                      << "// (start position "
+                      << start_positions[j]
+                      << ". detected size:"
+                      << (z-i)
+                      << " versus expected "
+                      << arg_sizes[j]
+                      << "\n\n";
+              error_while_parsing=true;
+            }
+            i+=arg_sizes[j]-1;
           }
-        }
+          if (error_while_parsing) break;
+          
+        } // for all known param names
+        
+        if (error_while_parsing) break;
         continue;
-      }
+        
+      } // if current bit is a var bit
 
       // capture constants in the instruction description
       BitInit *B = dyn_cast<BitInit>(bi->getBit(i));
@@ -353,13 +474,20 @@ void HotspotInstrInfoEmitter::run(raw_ostream &OS) {
     } //for bits
 
 
+    if (error_while_parsing) {
+      // Some error was detected earlier
+      // We already printed diagnostics
+      // Need to go now to the next instruction record
+      continue;
+      
+    }
 
 
     // ==================================
-    // Print method name and parameters
+    // Print method name and parameters (skipping out args))
     OS << "void Assembler::"
             << name;
-    for (int j = Out->getNumArgs(); j < arg_names.size(); j++) {
+    for (int j = start_of_in_args; j < arg_names.size(); j++) {
       if (j == Out->getNumArgs()) OS << "_";
       OS << arg_names[j][0];
     }
@@ -383,13 +511,18 @@ void HotspotInstrInfoEmitter::run(raw_ostream &OS) {
     // Encode parameters
     for (int j = 0; j < arg_names.size(); j++) {
 
-      if ((arg_sizes[j] == -1) || (start_positions[j] == -1)) {
-
+      if (arg_sizes[j] == -1) {
         OS << "  // Error while parsing record " << name << "\n";
         // Save the "bad record"
         troubled_records.push_back(name);
         // No reason to encode instruction further
         break;
+      }
+      
+      if (start_positions[j] == -1) {
+
+        // Skip parameter j in emition since it was not found in the encoding
+        continue;
       }
 
       OS << "  instr_enc |= ("
@@ -429,7 +562,9 @@ void HotspotInstrInfoEmitter::run(raw_ostream &OS) {
   OS << "} // End namespace llvm\n";
 
   OS << "\n\n// Total instruction records: " << total<<"\n";  
-  OS << "// Emitted methods (including faulty ones): " << good<<"\n";  
+  OS << "// Emitted methods: " << good<<"\n";  
+  OS << "// Number of instructions that were discarded because of weared encoding: "
+          << nr_inst_with_broken_encodings << "\n";
   int errors=(int)troubled_records.size();
   /*
    * if (errors) {
