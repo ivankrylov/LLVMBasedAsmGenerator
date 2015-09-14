@@ -174,8 +174,10 @@ void HotspotInstrInfoEmitter::run(raw_ostream &OS) {
   unsigned ListNumber = 0;
   std::vector<std::string> troubled_records;
   int total=0;
+  int total_recs=0;
   int good=0;
-  int nr_inst_with_broken_encodings=0;
+  int shortcomming=0;
+  int not_32bits=0;
 
   // Emit all of the instruction's implicit uses and defs.
   for (const CodeGenInstruction *II : Target.instructions()) {
@@ -187,7 +189,10 @@ void HotspotInstrInfoEmitter::run(raw_ostream &OS) {
     unsigned output_registers = 0;
     unsigned immed = 0;
 
-    if (Inst->isValueUnset("NAME")) continue;
+    if (Inst->isValueUnset("NAME")) {
+      good++;
+      continue;
+    }
     auto name = Inst->getValueAsString("NAME");
 
     // TODO: troubles with instructions starting with t
@@ -195,21 +200,16 @@ void HotspotInstrInfoEmitter::run(raw_ostream &OS) {
       OS << "//Exclusion of instruction record "
               << name 
               << ". \n//due to knon issues with instructions that start with 't'\n\n";
+      shortcomming++;
       continue;
     }
     if (name[0]=='s') {
       OS << "//Exclusion of instruction record "
               << name 
               << ". \n//due to knon issues with instructions that start with 's'\n\n";
+      shortcomming++;
       continue;
     }
-    
-    //#ifdef DEBUG_PRINTS_HOTSPOT_INST_GENERATOR
-    //OS << "Record: " << *Inst << "\n\n\n";
-    //#endif // DEBUG_PRINTS_HOTSPOT_INST_GENERATOR
-
-#define SKIP_RECORD(R) if (name.compare(#R)==0) continue;
-
 
     // this check borrowed from void FixedLenDecoderEmitter::run(..)
     unsigned Size = Inst->getValueAsInt("Size");
@@ -221,6 +221,7 @@ void HotspotInstrInfoEmitter::run(raw_ostream &OS) {
       OS << "//Proper exclusion of instruction record "
               << name 
               << ". \n//Not part of the actual instruction set\n\n";
+      good++;
       continue;
     }
 
@@ -231,6 +232,7 @@ void HotspotInstrInfoEmitter::run(raw_ostream &OS) {
       OS << "//Proper exclusion of instruction record "
               << name 
               << ". \n//The Inst Record is not found or incomplete\n\n";
+      good++;
       continue;
     }
 
@@ -239,6 +241,7 @@ void HotspotInstrInfoEmitter::run(raw_ostream &OS) {
               << "//therefore skipping instruction record "
               << name 
               << "\n\n";
+      not_32bits++;
       continue;
     }
 
@@ -302,11 +305,16 @@ void HotspotInstrInfoEmitter::run(raw_ostream &OS) {
       if (aname.empty()) {
         // No name for VarArg, see EORrsr for example
 
-        // We still will try to generate such instruction
         error_while_parsing=true;
         
+        shortcomming++;
+
         continue;
       }
+      
+      
+      // Still debating if and how we should handle instructions with cc_out bit
+      
       if (0) {//StrEq(aname,"s")  { 
         // we deliberately omit the cc_out argument
         // see comments in ARMAsmParser::shouldOmitCCOutOperand
@@ -324,6 +332,7 @@ void HotspotInstrInfoEmitter::run(raw_ostream &OS) {
               << name 
               << "\n\n";
         error_while_parsing=true;
+        shortcomming++;
         continue;
       } // end of a check fro "s"
 
@@ -348,6 +357,7 @@ void HotspotInstrInfoEmitter::run(raw_ostream &OS) {
                     << name 
                     << "\n\n";
               // Don't know how to handle these
+              shortcomming++;
               error_while_parsing=true;
               continue;
             } else {
@@ -484,7 +494,6 @@ void HotspotInstrInfoEmitter::run(raw_ostream &OS) {
                       << " versus expected "
                       << arg_sizes[j]
                       << ")\n\n";
-              nr_inst_with_broken_encodings++;
               error_while_parsing=true;
             }           
             
@@ -525,7 +534,10 @@ void HotspotInstrInfoEmitter::run(raw_ostream &OS) {
 
       // capture constants in the instruction description
       BitInit *B = dyn_cast<BitInit>(bi->getBit(i));
-      if (!B) continue;
+      if (!B) {
+        good++;
+        continue;
+      }
 
       // is llvm::Init::InitKind.IK_BinOpInit
       if ((B->getKind() == 0) && (B->getValue())) {
@@ -590,7 +602,7 @@ void HotspotInstrInfoEmitter::run(raw_ostream &OS) {
     // Emit intruction and exit
     OS << "  emit_arith(instr_enc);\n}\n\n";
 
-    good++;
+    total_recs++;
 
 
 #if 0    
@@ -612,9 +624,13 @@ void HotspotInstrInfoEmitter::run(raw_ostream &OS) {
   OS << "} // End namespace llvm\n";
 
   OS << "\n\n// Total instruction records: " << total<<"\n";  
-  OS << "// Emitted methods: " << good<<"\n";  
-  OS << "// Number of instructions that were discarded because of weared encoding: "
-          << nr_inst_with_broken_encodings << "\n";
+  OS << "// of those - emitted methods: " << total_recs<<"\n";  
+  OS << "//          - discarded properly: "
+          << good << "\n";
+  OS << "//          - discarded because we only process 32-bit long insts: "
+          << not_32bits << "\n";
+  OS << "//          - with kind of record we can't process yet "
+          << shortcomming  << "\n";
   int errors=(int)troubled_records.size();
   /*
    * if (errors) {
